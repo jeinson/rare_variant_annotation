@@ -1,0 +1,195 @@
+---
+title: "Gene Body Analysis"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    code_folding: hide
+    toc: yes
+---
+
+
+```{r}
+source("/gpfs/commons/groups/lappalainen_lab/jeinson/myPackages.R")
+```
+
+*Motivation:* If we look at variants in the gene bodies of all of the relevant genes, in addition to variants +/- 10kb of the TSS, can we get a better enrichment of rare variants?
+
+```{r}
+gene_attrs <- read_tsv("data/p05_relevant_genes_start_end.txt")
+gene_attrs <- gene_attrs[!duplicated(gene_attrs$`Gene stable ID`),]
+write_tsv(gene_attrs, "data/p05_relevant_genes_unique.txt")
+```
+
+What does the distribution of gene lengths look like?
+```{r}
+lengths <- gene_attrs$`Gene end (bp)` - gene_attrs$`Gene start (bp)`
+hist(log10(lengths), main = "Historgram of log gene lengths")
+abline(v = 4, col = "red", cex = 3)
+summary(lengths)
+```
+
+
+How far is a transcription start site from the gene body start site, on average?
+```{r}
+TSS_dist <- gene_attrs$`Transcription start site (TSS)` - gene_attrs$`Gene start (bp)`
+hist(log10(TSS_dist), main = "Histogram of log distance from TSS to gene start")
+abline(v = 4, col = "red", cex = 3)
+
+```
+
+# .5% MAF or less SNVs
+
+## Perform annotation processing workflow
+```{r}
+alt_allele_mismatch_correction <- 
+  function(mat){
+    
+    mat[mat == -1] <- 0
+    
+    apply(mat, 1, function(r){
+      if (sum(r == 2) > length(r) / 200) {# Maintain a 0.005 MaF
+        r[r == 2] <- 0
+        return(r)
+      }
+      else return(r)
+    }) %>% t 
+  }
+```
+
+```{r}
+setwd("/gpfs/commons/groups/lappalainen_lab/jeinson/projects/aneva_river/gene_body_analysis/MAF005_gb_SNVs/")
+all_genes <- list.files() %>% str_extract("ENSG\\d+") %>% unique
+
+MAF_005_files <- list()
+
+for(gene in all_genes){
+  indv <- read_lines(paste0(gene, ".012.indv"))
+  pos <- read_lines(paste0(gene, ".012.pos")) %>% str_replace_all("\t", ":")
+  MAF_005_files[[gene]] <- stfu(read_delim(paste0(gene, ".012.t"), delim = " ", col_names = indv, skip = 1, progress = FALSE))
+  stfu(rownames(MAF_005_files[[gene]]) <- pos)
+}
+
+
+MAF_005_files <- MAF_005_files %>% map(alt_allele_mismatch_correction)
+```
+
+```{r}
+observed_snps <- do.call("rbind", MAF_005_files) %>% 
+  rowSums %>% 
+  is_greater_than(0) %>% which %>% names
+```
+
+```{r}
+pVals <- read_tsv("/gpfs/commons/groups/lappalainen_lab/jeinson/projects/aneva_river/fourTiss_gb_analysis/fourTiss_AD_mean_pVals.tsv.gz")
+pVals %<>% rename(GeneName = GENE_ID) %>% rename(AD_pVal = geo_means)
+```
+
+```{r}
+rare_snv_enrichment <- 
+  MAF_005_files %>%
+  map(colSums) %>%
+  map(as.data.frame) %>%
+  map(~.x %>% rownames_to_column("SubjectID")) %>%
+  bind_rows(.id = "GeneName") %>%
+  rename(RareSNVs = `.x[[i]]`)
+
+rare_snv_enrichment %<>% left_join(pVals %>% select(GeneName, SubjectID, AD_pVal)) %>% filter(!is.na(AD_pVal))
+rare_snv_enrichment %<>% mutate(sig = as.numeric(AD_pVal < 0.05))
+rare_snv_enrichment %<>% mutate(has_SNV = as.numeric(RareSNVs > 0))
+
+to_keep <- rare_snv_enrichment %>% split(.$GeneName) %>% map("sig") %>% map_dbl(sum) %>% is_greater_than(0) %>% which %>% names
+
+rare_snv_enrichment %<>% filter(GeneName %in% to_keep)
+
+#Take a look at what we've got now
+MAF005_enrichment <- rare_snv_enrichment
+MAF005_enrichment
+```
+
+What does the distribution of AD pVals look like? We can decide on a cutoff from there. 
+```{r}
+hist(rare_snv_enrichment$AD_pVal, main = "Histogram of AD pValues across 800ish genes", xlab = "pVal")
+hist(rare_snv_enrichment$AD_pVal[rare_snv_enrichment$AD_pVal < 0.05], main = "Historam of AD pValues less than 0.05", xlab = "pVal")
+```
+
+Make a Venn Diagram of significant genes and nearby rare variants
+```{r}
+library(limma)
+
+a <- vennCounts(rare_snv_enrichment %>% select(sig, has_SNV))
+vennDiagram(a, circle.col = c("yellow", "blue"))
+```
+
+$$ p(Sig) = 0.016 $$
+$$ p(has\ SNV) = 0.398 $$
+$$ p(has\ SNV | Sig) = 0.43 $$
+$$ p(Sig | has\ SNV) = 0.018 $$
+$$ p(Sig | no\ SNV ) = 0.0154$$
+
+Enrichment:
+$$ \frac{p(sig | has\ SNV)}{p(sig | no\ SNV)} = 1.166$$
+
+# 1% MAF or less SNVs
+```{r}
+setwd("/gpfs/commons/groups/lappalainen_lab/jeinson/projects/aneva_river/gene_body_analysis/MAF01_gb_SNVs/")
+all_genes <- list.files() %>% str_extract("ENSG\\d+") %>% unique
+
+MAF_01_files <- list()
+
+for(gene in all_genes){
+  indv <- read_lines(paste0(gene, ".012.indv"))
+  pos <- read_lines(paste0(gene, ".012.pos")) %>% str_replace_all("\t", ":")
+  MAF_01_files[[gene]] <- stfu(read_delim(paste0(gene, ".012.t"), delim = " ", col_names = indv, skip = 1, progress = FALSE))
+  stfu(rownames(MAF_01_files[[gene]]) <- pos)
+}
+
+
+MAF_01_files <- MAF_01_files %>% map(alt_allele_mismatch_correction)
+```
+
+
+```{r}
+pVals <- read_tsv("/gpfs/commons/groups/lappalainen_lab/jeinson/projects/aneva_river/fourTiss_gb_analysis/fourTiss_AD_mean_pVals.tsv.gz")
+pVals %<>% rename(GeneName = GENE_ID) %>% rename(AD_pVal = geo_means)
+```
+
+```{r}
+rare_snv_enrichment <-
+  MAF_01_files %>%
+  map(colSums) %>%
+  map(as.data.frame) %>%
+  map(~.x %>% rownames_to_column("SubjectID")) %>%
+  bind_rows(.id = "GeneName") %>%
+  rename(RareSNVs = `.x[[i]]`)
+
+rare_snv_enrichment %<>% left_join(pVals %>% select(GeneName, SubjectID, AD_pVal)) %>% filter(!is.na(AD_pVal))
+rare_snv_enrichment %<>% mutate(sig = as.numeric(AD_pVal < 0.05))
+rare_snv_enrichment %<>% mutate(has_SNV = as.numeric(RareSNVs > 0))
+
+to_keep <- rare_snv_enrichment %>% split(.$GeneName) %>% map("sig") %>% map_dbl(sum) %>% is_greater_than(0) %>% which %>% names
+
+rare_snv_enrichment %<>% filter(GeneName %in% to_keep)
+
+#Take a look at what we've got now
+MAF01_snv_enrichment <- rare_snv_enrichment
+MAF01_snv_enrichment
+```
+
+Make a Venn Diagram
+```{r}
+library(limma)
+a <- vennCounts(MAF01_snv_enrichment %>% select(sig, has_SNV))
+vennDiagram(a, circle.col = c("yellow", "blue"))
+```
+
+$$ p(Sig) = 0.016 $$
+$$ p(has\ SNV) = 0.517 $$
+$$ p(has\ SNV | Sig) = 0.57 $$
+$$ p(Sig | has\ SNV) = 0.018 $$
+$$ p(Sig | no\ SNV) = 0.015 $$
+Enrichment:
+
+$$ \frac{p(Sig | has\ SNV)}{p(Sig | no\ SNV)} = 1.2 $$
+
